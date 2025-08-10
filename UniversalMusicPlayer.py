@@ -8,6 +8,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
+import threading
+import InstagramBot
+from dotenv import load_dotenv
 
 # Configuration
 QUEUE_FILE = "queue.json"
@@ -15,8 +18,9 @@ DOWNLOAD_DIR = "downloaded_music"
 MAX_HISTORY = 3
 
 # Spotify API credentials - replace with your own
-SPOTIFY_CLIENT_ID = "b696f36ab8e94036a9407cf4ed44a4d0"
-SPOTIFY_CLIENT_SECRET = "999202b168f5412fa7319ee3c335689c"
+load_dotenv()
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
 # Global player controls
 player_instance = None
@@ -225,7 +229,10 @@ def pause_song():
 
 
 def skip_song():
-    global current_player, should_play
+    global current_player, should_play, is_paused
+    # když skipuju, určitě nechci zůstat ve 'paused' režimu
+    is_paused = False
+
     if current_player:
         current_player.stop()
 
@@ -244,25 +251,20 @@ def skip_song():
         print("❌ Žádná skladba k přeskočení")
         return
 
-    # Find current song (id=0)
+    # Najdi aktuální skladbu (id=0)
     current_song = next((item for item in queue if item['id'] == 0), None)
     if not current_song:
         print("❌ Nenalezena aktuální skladba")
         return
 
-    # Create new queue
+    # Postav novou frontu: current -> -1, >0 posuň o -1, historie posuň dolů
     new_queue = []
-
-    # 1. First process history items (id < 0)
     history_items = [item for item in queue if item['id'] < 0]
-
-    # Shift all history items down by 1
     for item in sorted(history_items, key=lambda x: x['id']):
         item['id'] -= 1
-        if item['id'] >= -MAX_HISTORY:  # Keep only limited history
+        if item['id'] >= -MAX_HISTORY:
             new_queue.append(item)
         else:
-            # Delete old song file
             if item['cesta_k_souboru'] and os.path.exists(item['cesta_k_souboru']):
                 try:
                     os.remove(item['cesta_k_souboru'])
@@ -270,16 +272,13 @@ def skip_song():
                 except:
                     pass
 
-    # 2. Add current song to history as id=-1
     current_song['id'] = -1
     new_queue.append(current_song)
 
-    # 3. Process upcoming songs (id > 0)
     for item in [item for item in queue if item['id'] > 0]:
         item['id'] -= 1
         new_queue.append(item)
 
-    # Save updated queue
     with open(QUEUE_FILE, 'w', encoding='utf-8') as f:
         json.dump(new_queue, f, indent=2, ensure_ascii=False)
 
@@ -405,21 +404,27 @@ def play_song(filepath=None):
         is_paused = False
         should_play = True
 
-        # Wait a moment for playback to start
-        time.sleep(0.5)
+        # Místo jednorázového čekání jemně čekej až 3 s na rozběhnutí přehrávání
+        start = time.time()
+        started = False
+        while time.time() - start < 3.0:
+            if current_player.is_playing():
+                started = True
+                break
+            time.sleep(0.1)
 
-        # Check if playback actually started
-        if not current_player.is_playing():
-            print("❌ Nepodařilo se spustit přehrávání")
-            should_play = False
+        if not started:
+            print("❌ Nepodařilo se spustit přehrávání (timeout)")
+            # DŮLEŽITÉ: neshazuj should_play; smyčka pak může zkusit další skladbu
     except Exception as e:
         print(f"❌ Chyba při přehrávání: {str(e)}")
-        should_play = False
+        # DŮLEŽITÉ: neshazuj should_play; ponecháme logiku na smyčce přehrávače
+
 
 
 def player_loop():
-    global should_play
-    print("\n🎵 Přehrávač spuštěn - čekám na skladby...")
+    global should_play, is_paused, current_player
+    print("\n🎵 Přehrávač spuštěn - čekám na skladby.")
     while True:
         try:
             current = get_current_song()
@@ -427,35 +432,53 @@ def player_loop():
                 time.sleep(2)
                 continue
 
-            song_name = Path(current['cesta_k_souboru']).stem
+            song_path = current['cesta_k_souboru']
+            song_name = Path(song_path).stem
+
             if should_play:
-                print(f"\n🎵 Nyní hraje: {song_name} [{current['format'].upper()}]")
-                try:
-                    play_song(current['cesta_k_souboru'])
+                # 🔧 OPRAVA: nespouštěj znovu, pokud už hraje (nebo se právě resumlo)
+                already_playing = current_player is not None and current_player.is_playing()
+                if not already_playing and not is_paused:
+                    print(f"\n🎵 Nyní hraje: {song_name} [{current['format'].upper()}]")
+                    try:
+                        play_song(song_path)
+                    except Exception as e:
+                        print(f"❌ Chyba při spuštění přehrávání: {str(e)}")
+                        should_play = False
+                        continue
 
-                    # Wait until playback finishes
-                    while current_player and current_player.is_playing():
-                        time.sleep(0.5)
+                # Čekej, dokud skladba neskončí (pauza = jen čekej, neposouvej frontu)
+                while True:
+                    if current_player is None:
+                        break
+                    if is_paused:
+                        time.sleep(0.2)
+                        continue
+                    if current_player.is_playing():
+                        time.sleep(0.2)
+                        continue
+                    # nehraje a není pauza -> skladba dohrála
+                    break
 
-                    # Song finished playing - update queue and play next
+                if not is_paused:
                     update_queue()
-                    next_song = get_current_song()  # Get new current song after update
+                    next_song = get_current_song()
                     if next_song and next_song['cesta_k_souboru']:
-                        print("\n🔜 Automaticky spouštím další skladbu...")
-                        play_song(next_song['cesta_k_souboru'])
+                        print("\n🔜 Automaticky spouštím další skladbu.")
+                        # spuštění další skladby, ale jen když se opravdu nehraje nic
+                        already_playing = current_player is not None and current_player.is_playing()
+                        if not already_playing:
+                            play_song(next_song['cesta_k_souboru'])
                     else:
                         print("\n⏹️ Konec fronty - žádné další skladby k přehrání")
                         should_play = False
-
-                except Exception as e:
-                    print(f"❌ Chyba při přehrávání: {str(e)}")
-                    should_play = False
             else:
-                print(f"\n🎵 Připraveno k přehrání: {song_name} [{current['format'].upper()}] (napište 'play' pro spuštění)")
                 time.sleep(2)
+
         except Exception as e:
             print(f"❌ Chyba v player_loop: {str(e)}")
             time.sleep(2)
+
 
 
 def add_song_process():
@@ -470,7 +493,7 @@ def add_song_process():
             user_input = input("Zadejte odkaz nebo příkaz: ").strip()
             if user_input.lower() == 'q':
                 break
-            elif user_input.lower() == 'next':
+            elif user_input.lower() == 'next' or user_input.lower() == 'skip':
                 skip_song()
                 continue
             elif user_input.lower() == 'previous':
@@ -500,7 +523,6 @@ def add_song_process():
                     print("✅ Nalezeno na YouTube")
                 else:
                     print("⚠️ Nenalezeno na YouTube - pokusím se stáhnout přímo ze Spotify")
-
             elif "soundcloud.com" in netloc:
                 print("🔍 SoundCloud odkaz - stahuji...")
             elif "youtube.com" in netloc or "youtu.be" in netloc:
@@ -516,8 +538,8 @@ def add_song_process():
                     add_to_queue(url, filepath, filetype)
                     print(f"✅ Úspěšně staženo: {Path(filepath).name}")
                     print(f"📁 Formát: {filetype.upper()}, Velikost: {os.path.getsize(filepath) / 1024:.1f} KB")
-                    print("ℹ️ Napište 'play' pro spuštění přehrávání")
-                    should_play = False  # New songs require explicit play command
+                    print("ℹ️ Napište 'play' pro spuštění přehrávání (pokud ještě nehraje)")
+                    # DŮLEŽITÉ: odstraněno `should_play = False` – neblokuj autoplay
                 else:
                     print("❌ Nepodařilo se stáhnout skladbu")
             except Exception as e:
@@ -530,6 +552,8 @@ def add_song_process():
 
 
 if __name__ == "__main__":
+    ig_thread = threading.Thread(target=InstagramBot.run, daemon=True)
+    ig_thread.start()
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
     # Initialize empty queue file if it doesn't exist
