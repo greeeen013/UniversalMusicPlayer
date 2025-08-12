@@ -420,67 +420,6 @@ def play_song(filepath=None):
         print(f"❌ Chyba při přehrávání: {str(e)}")
         # DŮLEŽITÉ: neshazuj should_play; ponecháme logiku na smyčce přehrávače
 
-
-
-def player_loop():
-    global should_play, is_paused, current_player
-    print("\n🎵 Přehrávač spuštěn - čekám na skladby.")
-    while True:
-        try:
-            current = get_current_song()
-            if not current or not current['cesta_k_souboru']:
-                time.sleep(2)
-                continue
-
-            song_path = current['cesta_k_souboru']
-            song_name = Path(song_path).stem
-
-            if should_play:
-                # 🔧 OPRAVA: nespouštěj znovu, pokud už hraje (nebo se právě resumlo)
-                already_playing = current_player is not None and current_player.is_playing()
-                if not already_playing and not is_paused:
-                    print(f"\n🎵 Nyní hraje: {song_name} [{current['format'].upper()}]")
-                    try:
-                        play_song(song_path)
-                    except Exception as e:
-                        print(f"❌ Chyba při spuštění přehrávání: {str(e)}")
-                        should_play = False
-                        continue
-
-                # Čekej, dokud skladba neskončí (pauza = jen čekej, neposouvej frontu)
-                while True:
-                    if current_player is None:
-                        break
-                    if is_paused:
-                        time.sleep(0.2)
-                        continue
-                    if current_player.is_playing():
-                        time.sleep(0.2)
-                        continue
-                    # nehraje a není pauza -> skladba dohrála
-                    break
-
-                if not is_paused:
-                    update_queue()
-                    next_song = get_current_song()
-                    if next_song and next_song['cesta_k_souboru']:
-                        print("\n🔜 Automaticky spouštím další skladbu.")
-                        # spuštění další skladby, ale jen když se opravdu nehraje nic
-                        already_playing = current_player is not None and current_player.is_playing()
-                        if not already_playing:
-                            play_song(next_song['cesta_k_souboru'])
-                    else:
-                        print("\n⏹️ Konec fronty - žádné další skladby k přehrání")
-                        should_play = False
-            else:
-                time.sleep(2)
-
-        except Exception as e:
-            print(f"❌ Chyba v player_loop: {str(e)}")
-            time.sleep(2)
-
-
-
 def add_song_process():
     global should_play
     print("\n🎵 Hudební stahovač v2.4")
@@ -549,6 +488,137 @@ def add_song_process():
             break
         except Exception as e:
             print(f"Neočekávaná chyba: {str(e)}")
+
+def player_loop():
+    global should_play, is_paused, current_player
+    print("\n🎵 Přehrávač spuštěn - čekám na skladby.")
+    while True:
+        try:
+            current = get_current_song()
+            if not current or not current['cesta_k_souboru']:
+                time.sleep(2)
+                continue
+
+            song_path = current['cesta_k_souboru']
+            song_name = Path(song_path).stem
+
+            if should_play:
+                # 🔧 OPRAVA: nespouštěj znovu, pokud už hraje (nebo se právě resumlo)
+                already_playing = current_player is not None and current_player.is_playing()
+                if not already_playing and not is_paused:
+                    print(f"\n🎵 Nyní hraje: {song_name} [{current['format'].upper()}]")
+                    try:
+                        play_song(song_path)
+                    except Exception as e:
+                        print(f"❌ Chyba při spuštění přehrávání: {str(e)}")
+                        should_play = False
+                        continue
+
+                # Čekej, dokud skladba neskončí (pauza = jen čekej, neposouvej frontu)
+                while True:
+                    if current_player is None:
+                        break
+                    if is_paused:
+                        time.sleep(0.2)
+                        continue
+                    if current_player.is_playing():
+                        time.sleep(0.2)
+                        continue
+                    # nehraje a není pauza -> skladba dohrála
+                    break
+
+                if not is_paused:
+                    update_queue()
+                    next_song = get_current_song()
+                    if next_song and next_song['cesta_k_souboru']:
+                        print("\n🔜 Automaticky spouštím další skladbu.")
+                        # spuštění další skladby, ale jen když se opravdu nehraje nic
+                        already_playing = current_player is not None and current_player.is_playing()
+                        if not already_playing:
+                            play_song(next_song['cesta_k_souboru'])
+                    else:
+                        print("\n⏹️ Konec fronty - žádné další skladby k přehrání")
+                        should_play = False
+            else:
+                time.sleep(2)
+
+        except Exception as e:
+            print(f"❌ Chyba v player_loop: {str(e)}")
+            time.sleep(2)
+
+def set_volume(value: int) -> bool:
+    """
+    Nastaví hlasitost (0–100) přes VLC.
+    Vrací True/False dle úspěchu.
+    """
+    global current_player
+    try:
+        v = max(0, min(100, int(value)))
+        if current_player is None:
+            # připrav přehrávač, aby se dalo nastavit i před spuštěním
+            if player_instance is None:
+                # vytvoř základ bez spouštění přehrávání
+                import vlc as _vlc
+                globals()['player_instance'] = _vlc.Instance()
+                globals()['current_player'] = player_instance.media_player_new()
+        if current_player is not None:
+            current_player.audio_set_volume(v)
+            print(f"🔊 Volume set to {v}")
+            return True
+    except Exception as e:
+        print(f"❌ Chyba při nastavování hlasitosti: {e}")
+    return False
+
+
+def _read_queue():
+    """Interní: načte queue.json jako list (nevyhazuje výjimky)."""
+    if not os.path.exists(QUEUE_FILE) or os.path.getsize(QUEUE_FILE) == 0:
+        return []
+    try:
+        with open(QUEUE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        return []
+
+
+
+
+def get_queue_overview(limit: int = 10) -> str:
+    """
+    Vrátí hezky formátovaný text fronty pro chat:
+    - řádek s '▶️ Now playing'
+    - pár následujících skladeb
+    - poslední 1 v historii (pokud existuje)
+    """
+    from pathlib import Path as _Path
+    q = _read_queue()
+    if not q:
+        return "📭 Fronta je prázdná."
+
+    # Najdi current (id == 0), next (>0 seřadit), previous (id == -1)
+    current = next((i for i in q if i.get('id') == 0), None)
+    nexts = sorted([i for i in q if i.get('id', 999) > 0], key=lambda x: x['id'])
+    prev = next((i for i in q if i.get('id') == -1), None)
+
+    lines = []
+    if prev:
+        lines.append(f"⏮️ Předtím: {_Path(prev.get('cesta_k_souboru','')).stem}")
+
+    if current:
+        lines.append(f"▶️ Teď hraje: {_Path(current.get('cesta_k_souboru','')).stem}")
+    else:
+        lines.append("▶️ Teď nehraje nic.")
+
+    if nexts:
+        lines.append("🔜 Další:")
+        for i, item in enumerate(nexts[:max(0, limit - 2)]):  # nech trochu místa
+            lines.append(f"  {i+1}. {_Path(item.get('cesta_k_souboru','')).stem}")
+    else:
+        lines.append("🔜 Další: (nic ve frontě)")
+
+    return "\n".join(lines)
+
+
 
 
 if __name__ == "__main__":

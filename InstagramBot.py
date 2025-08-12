@@ -64,6 +64,7 @@ URL_REGEX = re.compile(
     re.IGNORECASE,
 )
 SET_COOLDOWN_REGEX = re.compile(r"^\s*set\s+cooldown\s+(\d+)\s*$", re.IGNORECASE)
+VOLUME_REGEX = re.compile(r"^\s*volume\s+(\d{1,3})\s*$", re.IGNORECASE)
 
 
 # -----------------------------
@@ -377,6 +378,41 @@ def _process_command(msg_text: str, from_user_id: str) -> bool:
         else:
             _ig_send_text("❌ Nelze přejít na předchozí skladbu.")
         return True
+
+    # volume XXX (pro všechny)
+    m = VOLUME_REGEX.match(msg_text)
+    if m:
+        try:
+            vol = int(m.group(1))
+            vol = max(0, min(100, vol))
+            setter = getattr(ump, "set_volume", None)
+            ok = False
+            if callable(setter):
+                ok = setter(vol)
+            if ok:
+                _ig_send_text(f"🔊 Hlasitost nastavena na {vol} %.")
+            else:
+                _ig_send_text("❌ Nepodařilo se nastavit hlasitost.")
+        except Exception:
+            _ig_send_text("❌ Neplatná hodnota hlasitosti. Použij: volume 0–100")
+        return True
+
+    # queue (pro všechny)
+    if t == "queue":
+        overview_fn = getattr(ump, "get_queue_overview", None)
+        if callable(overview_fn):
+            try:
+                text = overview_fn(limit=10)
+                # Instagram DM někdy škrtil dlouhé zprávy – držme to rozumně krátké
+                if len(text) > 900:
+                    text = text[:900] + "\n…"
+                _ig_send_text(text)
+            except Exception:
+                _ig_send_text("❌ Nepodařilo se načíst frontu.")
+        else:
+            _ig_send_text("❌ Tato verze přehrávače neumí vypsat frontu.")
+        return True
+
 
     return False  # nebyl to příkaz
 
